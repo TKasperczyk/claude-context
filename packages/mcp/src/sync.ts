@@ -58,7 +58,12 @@ export class SyncManager {
 
                 try {
                     console.log(`[SYNC-DEBUG] Calling context.reindexByChange() for '${codebasePath}'`);
-                    const stats = await this.context.reindexByChange(codebasePath);
+                    const SYNC_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes per codebase
+                    const reindexPromise = this.context.reindexByChange(codebasePath);
+                    const timeoutPromise = new Promise<never>((_, reject) =>
+                        setTimeout(() => reject(new Error(`Sync timed out after ${SYNC_TIMEOUT_MS}ms for '${codebasePath}'`)), SYNC_TIMEOUT_MS)
+                    );
+                    const stats = await Promise.race([reindexPromise, timeoutPromise]);
                     const codebaseElapsed = Date.now() - codebaseStartTime;
 
                     console.log(`[SYNC-DEBUG] Reindex stats for '${codebasePath}':`, stats);
@@ -126,7 +131,8 @@ export class SyncManager {
                     console.log('[SYNC-DEBUG] Collection not yet established, this is expected for new cluster users. Will retry on next sync cycle.');
                 } else {
                     console.error('[SYNC-DEBUG] Initial sync failed with unexpected error:', error);
-                    throw error;
+                    // Don't rethrow -- crashing the MCP server is worse than a failed sync.
+                    // The next periodic sync will retry.
                 }
             }
         }, 5000); // Initial sync after 5 seconds

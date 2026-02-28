@@ -24,6 +24,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     protected config: MilvusConfig;
     private client: MilvusClient | null = null;
     protected initializationPromise: Promise<void>;
+    private resolvedAddress: string | null = null;
 
     constructor(config: MilvusConfig) {
         this.config = config;
@@ -33,20 +34,62 @@ export class MilvusVectorDatabase implements VectorDatabase {
     }
 
     private async initialize(): Promise<void> {
-        const resolvedAddress = await this.resolveAddress();
-        await this.initializeClient(resolvedAddress);
+        this.resolvedAddress = await this.resolveAddress();
+        await this.initializeClient(this.resolvedAddress);
     }
 
     private async initializeClient(address: string): Promise<void> {
         const milvusConfig = this.config as MilvusConfig;
-        console.log('🔌 Connecting to vector database at: ', address);
+        console.log('[MilvusDB] Connecting to vector database at:', address);
         this.client = new MilvusClient({
             address: address,
             username: milvusConfig.username,
             password: milvusConfig.password,
             token: milvusConfig.token,
             ssl: milvusConfig.ssl || false,
+            timeout: 30000,
+            channelOptions: {
+                'grpc.keepalive_time_ms': 30 * 1000,
+                'grpc.keepalive_timeout_ms': 5 * 1000,
+                'grpc.keepalive_permit_without_calls': 1,
+            },
         });
+    }
+
+    /**
+     * Check if the Milvus connection is healthy.
+     * Returns true if healthy, false if dead or unreachable.
+     */
+    private async isConnectionHealthy(): Promise<boolean> {
+        if (!this.client) return false;
+        try {
+            const healthPromise = this.client.checkHealth();
+            const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Health check timed out')), 5000)
+            );
+            const result = await Promise.race([healthPromise, timeoutPromise]);
+            return result.isHealthy;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Recreate the Milvus client when the connection is dead.
+     */
+    private async reconnect(): Promise<void> {
+        console.log('[MilvusDB] Connection unhealthy, reconnecting...');
+        if (this.client) {
+            try {
+                await this.client.closeConnection();
+            } catch {
+                // Ignore errors closing a dead connection
+            }
+            this.client = null;
+        }
+        const address = this.resolvedAddress || await this.resolveAddress();
+        await this.initializeClient(address);
+        console.log('[MilvusDB] Reconnected successfully.');
     }
 
     /**
@@ -69,12 +112,16 @@ export class MilvusVectorDatabase implements VectorDatabase {
     }
 
     /**
-     * Ensure initialization is complete before method execution
+     * Ensure initialization is complete and connection is healthy.
+     * Reconnects automatically if the gRPC connection has dropped.
      */
     protected async ensureInitialized(): Promise<void> {
         await this.initializationPromise;
         if (!this.client) {
             throw new Error('Client not initialized');
+        }
+        if (!await this.isConnectionHealthy()) {
+            await this.reconnect();
         }
     }
 
