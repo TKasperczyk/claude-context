@@ -25,6 +25,8 @@ export class MilvusVectorDatabase implements VectorDatabase {
     private client: MilvusClient | null = null;
     protected initializationPromise: Promise<void>;
     private resolvedAddress: string | null = null;
+    private lastHealthCheckMs: number = 0;
+    private static readonly HEALTH_CHECK_INTERVAL_MS = 60 * 1000; // Check at most once per minute
 
     constructor(config: MilvusConfig) {
         this.config = config;
@@ -113,6 +115,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
 
     /**
      * Ensure initialization is complete and connection is healthy.
+     * Health checks are rate-limited to once per minute to avoid overhead.
      * Reconnects automatically if the gRPC connection has dropped.
      */
     protected async ensureInitialized(): Promise<void> {
@@ -120,8 +123,12 @@ export class MilvusVectorDatabase implements VectorDatabase {
         if (!this.client) {
             throw new Error('Client not initialized');
         }
-        if (!await this.isConnectionHealthy()) {
-            await this.reconnect();
+        const now = Date.now();
+        if (now - this.lastHealthCheckMs > MilvusVectorDatabase.HEALTH_CHECK_INTERVAL_MS) {
+            this.lastHealthCheckMs = now;
+            if (!await this.isConnectionHealthy()) {
+                await this.reconnect();
+            }
         }
     }
 
